@@ -1,0 +1,501 @@
+openapi: 3.0.3
+info:
+  title: IgwebuIke Alumni Network API
+  version: 2.3.0
+  description: Secure alumni networking API. Authentication uses an httpOnly cookie named `iw_token`.
+servers:
+- url: https://igwebuike-backend-1.onrender.com
+- url: http://localhost:5000
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: iw_token
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+    User:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum:
+          - alumni
+          - employer
+          - admin
+        alumniCode:
+          type: string
+          example: IWU-CSC-20-4821
+    RegisterRequest:
+      type: object
+      required:
+      - firstName
+      - lastName
+      - email
+      - password
+      - gradYear
+      - department
+      - consent
+      properties:
+        firstName:
+          type: string
+          maxLength: 50
+        lastName:
+          type: string
+          maxLength: 50
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 10
+          maxLength: 72
+          description: Max 72 BYTES (bcrypt limit)
+        gradYear:
+          type: integer
+        department:
+          type: string
+        phone:
+          type: string
+          maxLength: 20
+        location:
+          type: string
+        occupation:
+          type: string
+        consent:
+          type: boolean
+          description: Must be true
+    LoginRequest:
+      type: object
+      required:
+      - email
+      - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+  responses:
+    Unauthorized:
+      description: Not logged in
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Role not allowed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+paths:
+  /healthz:
+    get:
+      summary: Readiness (database connected)
+      responses:
+        '200':
+          description: ready
+        '503':
+          description: database unavailable
+  /api/alumni/register:
+    post:
+      summary: Register and log in
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Created; sets iw_token cookie
+        '400':
+          description: Validation failed
+        '409':
+          description: Email already registered
+        '429':
+          description: Rate limited
+  /api/alumni/recent:
+    get:
+      summary: Newest members (names and codes masked)
+      responses:
+        '200':
+          description: OK
+  /api/auth/login:
+    post:
+      summary: Log in (5 failures lock the account for 15 minutes)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: OK; sets iw_token cookie
+        '400':
+          description: Malformed input
+        '401':
+          description: Invalid credentials or account locked (deliberately identical)
+        '429':
+          description: Rate limited
+  /api/auth/logout:
+    post:
+      summary: Log out and revoke all sessions
+      responses:
+        '200':
+          description: OK
+  /api/auth/me:
+    get:
+      summary: Current user
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: OK
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/events/book:
+    post:
+      summary: Book an event (identity from session)
+      security:
+      - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - eventName
+              - phone
+              properties:
+                eventName:
+                  type: string
+                phone:
+                  type: string
+      responses:
+        '201':
+          description: Booked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Already booked
+  /api/events/bookings:
+    get:
+      summary: All bookings (admin only)
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: OK
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/jobs:
+    get:
+      summary: 'List published jobs (public). Filters: q (text search), type, skill, location, page, limit<=20'
+      responses:
+        '200':
+          description: OK
+    post:
+      summary: Post a job. Members' jobs are PENDING until an admin approves; employers/admins publish immediately
+      responses:
+        '200':
+          description: OK
+        '401': &id001
+          $ref: '#/components/responses/Unauthorized'
+        '201':
+          description: Created
+        '400':
+          description: Validation failed
+      security: &id002
+      - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - title
+              - company
+              - location
+              - type
+              - description
+              properties:
+                title:
+                  type: string
+                company:
+                  type: string
+                location:
+                  type: string
+                type:
+                  type: string
+                  enum:
+                  - full-time
+                  - part-time
+                  - contract
+                  - internship
+                  - remote
+                description:
+                  type: string
+                  minLength: 30
+                  maxLength: 5000
+                skills:
+                  type: array
+                  items:
+                    type: string
+                  maxItems: 15
+                applyUrl:
+                  type: string
+                  description: https only
+  /api/jobs/mine:
+    get:
+      summary: My posted jobs with application counts
+      responses:
+        '200':
+          description: OK
+        '401': *id001
+      security: *id002
+  /api/jobs/{id}:
+    get:
+      summary: One published job (public)
+      parameters: &id003
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^[a-f0-9]{24}$
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+  /api/jobs/{id}/apply:
+    post:
+      summary: Apply to a job (once). Optional alumni referral code
+      responses:
+        '200':
+          description: OK
+        '401': *id001
+        '201':
+          description: Submitted
+        '400':
+          description: Invalid / own job
+        '404':
+          description: Not found
+        '409':
+          description: Already applied
+      security: *id002
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - coverNote
+              properties:
+                coverNote:
+                  type: string
+                  minLength: 20
+                  maxLength: 2000
+                cvUrl:
+                  type: string
+                referrerCode:
+                  type: string
+                  example: IWU-CSC-20-4821
+      parameters: *id003
+  /api/jobs/{id}/applications:
+    get:
+      summary: Applicants of a job (owner or admin; others get 404)
+      responses:
+        '200':
+          description: OK
+        '401': *id001
+        '404':
+          description: Not found or not yours
+      security: *id002
+      parameters: *id003
+  /api/jobs/{id}/close:
+    patch:
+      summary: Close a job (owner or admin)
+      responses:
+        '200':
+          description: OK
+        '401': *id001
+        '404':
+          description: Not found or not yours
+      security: *id002
+      parameters: *id003
+  /api/applications/mine:
+    get:
+      summary: My applications and their status
+      responses:
+        '200':
+          description: OK
+        '401': *id001
+      security: *id002
+  /api/applications/{id}/status:
+    patch:
+      summary: 'Change application status (job owner/admin). Legal: submitted>reviewing|rejected, reviewing>shortlisted|rejected,
+        shortlisted>hired|rejected'
+      responses:
+        '200':
+          description: OK
+        '401': *id001
+        '404':
+          description: Not found or not yours
+        '409':
+          description: Illegal transition
+      security: *id002
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - status
+              properties:
+                status:
+                  type: string
+                  enum:
+                  - reviewing
+                  - shortlisted
+                  - rejected
+                  - hired
+      parameters: *id003
+  /api/admin/jobs/pending:
+    get:
+      summary: Moderation queue (admin)
+      responses:
+        '200':
+          description: OK
+        '401': *id001
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      security: *id002
+  /api/admin/jobs/{id}/moderate:
+    patch:
+      summary: Approve or reject a pending job (admin)
+      responses:
+        '200':
+          description: OK
+        '401': *id001
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Already moderated
+      security: *id002
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - action
+              properties:
+                action:
+                  type: string
+                  enum:
+                  - approve
+                  - reject
+      parameters: *id003
+  /api/alumni/me:
+    get:
+      summary: My matching profile (skills, occupation, bio)
+      security: &id004
+      - cookieAuth: []
+      responses:
+        '200':
+          description: OK
+        '401': &id005
+          $ref: '#/components/responses/Unauthorized'
+    patch:
+      summary: Update my skills/occupation/bio (other fields ignored)
+      security: *id004
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                skills:
+                  type: array
+                  items:
+                    type: string
+                  maxItems: 15
+                occupation:
+                  type: string
+                  maxLength: 80
+                bio:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: OK
+        '400':
+          description: Validation failed
+        '401': *id005
+  /api/jobs/recommended:
+    get:
+      summary: Jobs ranked for me. ML ranking if the matching service is up, else keyword fallback. Excludes my own and already-applied
+        jobs.
+      security: *id004
+      responses:
+        '200':
+          description: '{ model, needsProfile, recommendations:[{rank, score(0..1), matched[], job}] }'
+        '401': *id005
+  /api/jobs/recommendations/events:
+    post:
+      summary: Log feedback on a recommendation (view | apply | dismiss)
+      security: *id004
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - jobId
+              - action
+              - rank
+              - model
+              properties:
+                jobId:
+                  type: string
+                action:
+                  type: string
+                  enum:
+                  - view
+                  - apply
+                  - dismiss
+                rank:
+                  type: integer
+                  minimum: 1
+                  maximum: 50
+                model:
+                  type: string
+                  maxLength: 60
+      responses:
+        '201':
+          description: Recorded
+        '400':
+          description: Invalid event
+        '401': *id005

@@ -1,128 +1,107 @@
-const express  = require("express");
-const bcrypt   = require("bcryptjs");
-const Alumni   = require("../models/Alumni");
+const express = require("express");
+const crypto  = require("crypto");
+const bcrypt  = require("bcryptjs");
+const Alumni  = require("../models/Alumni");
+const { validateRegistration } = require("../utils/validators");
+const { setAuthCookie } = require("../utils/tokens");
+const { authenticate } = require("../middleware/auth");
+const { validateProfileUpdate } = require("../utils/profileRules");
 
 const router = express.Router();
 
-// ─── Helper: generate alumni code ─────────────────────────────────────────────
 const DEPT_MAP = {
-  "computer science":          "CSC",
-  "electrical engineering":    "EEE",
-  "mechanical engineering":    "MEE",
-  "accounting":                "ACC",
-  "business administration":   "BUS",
-  "computer engineering":      "CME",
-  "veterinary medicine":       "VET",
-  "industrial chemistry":      "CHM",
-  "agricultural engineering":  "AGR",
-  "agric economics":           "AEC",
+  "computer science": "CSC", "electrical engineering": "EEE", "mechanical engineering": "MEE",
+  "accounting": "ACC", "business administration": "BUS", "computer engineering": "CME",
+  "veterinary medicine": "VET", "industrial chemistry": "CHM",
+  "agricultural engineering": "AGR", "agric economics": "AEC",
 };
 
 function deptAbbrev(dept) {
   const lower = dept.toLowerCase();
-  for (const [key, abbr] of Object.entries(DEPT_MAP)) {
-    if (lower.includes(key)) return abbr;
-  }
-  return dept.slice(0, 3).toUpperCase();
+  for (const [key, abbr] of Object.entries(DEPT_MAP)) if (lower.includes(key)) return abbr;
+  return dept.replace(/[^a-z]/gi, "").slice(0, 3).toUpperCase().padEnd(3, "X");
 }
 
+// crypto.randomInt is cryptographically secure; Math.random() is predictable.
+// The code is now just an identifier, NOT a credential (login is by password).
 function generateCode(dept, year) {
-  const abbr = deptAbbrev(dept);
-  const yr   = String(year).slice(-2);
-  const rand = Math.floor(1000 + Math.random() * 9000);
-  return `IWU-${abbr}-${yr}-${rand}`;
+  return `IWU-${deptAbbrev(dept)}-${String(year).slice(-2)}-${crypto.randomInt(1000, 10000)}`;
 }
 
-// ─── POST /api/alumni/register ────────────────────────────────────────────────
-// Registers a new alumni member and returns their alumni code.
+// POST /api/alumni/register
 router.post("/register", async (req, res) => {
+  const parsed = validateRegistration(req.body);
+  if (parsed.errors) return res.status(400).json({ error: parsed.errors[0], errors: parsed.errors });
+  const v = parsed.value;
+
   try {
-    const {
-      firstName, lastName, email, password,
-      gradYear, department, phone, location, occupation,
-    } = req.body;
+    const hashed = await bcrypt.hash(v.password, 12); // cost 12 = ~250ms: fine for users, slow for attackers
 
-    // --- Basic validation ---
-    if (!firstName || !lastName || !email || !password || !gradYear || !department) {
-      return res.status(400).json({ error: "Please fill in all required fields." });
+    // Retry on the (rare) alumniCode collision. The unique index is the real guard.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const alumni = await Alumni.create({
+          firstName: v.firstName, lastName: v.lastName, email: v.email, password: hashed,
+          gradYear: v.gradYear, department: v.department, phone: v.phone,
+          location: v.location, occupation: v.occupation,
+          alumniCode: generateCode(v.department, v.gradYear),
+          role: "alumni",              // ALWAYS server-decided
+          consentAt: new Date(),
+        });
+        setAuthCookie(res, alumni);    // log them in straight away
+        return res.status(201).json({
+          message: "Registration successful!", alumniCode: alumni.alumniCode,
+          name: `${v.firstName} ${v.lastName}`, department: v.department, gradYear: v.gradYear,
+        });
+      } catch (err) {
+        if (err.code === 11000 && err.keyPattern && err.keyPattern.email) {
+          return res.status(409).json({ error: "An account with this email already exists." });
+        }
+        if (err.code !== 11000) throw err; // duplicate alumniCode => loop and try again
+      }
     }
-    if (password.length < 6) {
-      return res.status(400).json({ error: "Password must be at least 6 characters." });
-    }
-
-    // --- Check duplicate email ---
-    const existing = await Alumni.findOne({ email: email.toLowerCase() });
-    if (existing) {
-      return res.status(409).json({ error: "An account with this email already exists." });
-    }
-
-    // --- Hash password ---
-    const hashed = await bcrypt.hash(password, 10);
-
-    // --- Generate unique alumni code (retry if collision) ---
-    let alumniCode;
-    let tries = 0;
-    do {
-      alumniCode = generateCode(department, gradYear);
-      tries++;
-    } while ((await Alumni.findOne({ alumniCode })) && tries < 5);
-
-    // --- Save to database ---
-    const alumni = new Alumni({
-      firstName, lastName, email,
-      password: hashed,
-      gradYear: parseInt(gradYear),
-      department,
-      phone:      phone      || "",
-      location:   location   || "Nigeria",
-      occupation: occupation || "",
-      alumniCode,
-    });
-
-    await alumni.save();
-
-    // --- Return success (never return the password hash) ---
-    return res.status(201).json({
-      message:    "Registration successful!",
-      alumniCode,
-      name:       `${firstName} ${lastName}`,
-      department,
-      gradYear,
-    });
-
+    return res.status(500).json({ error: "Could not generate an alumni code. Try again." });
   } catch (err) {
     console.error("Register error:", err.message);
     return res.status(500).json({ error: "Server error. Please try again." });
   }
 });
 
-// ─── GET /api/alumni/recent ───────────────────────────────────────────────────
-// Returns the 10 most recently registered alumni for the live timeline.
-// Sensitive fields (email, password) are excluded.
+// GET /api/alumni/recent  (public)
+// DATA MINIMISATION: this is public, so it must not expose real people's full
+// names or IDs. Show "Adaeze N.", department, year; mask the code.
 router.get("/recent", async (req, res) => {
   try {
-    const recent = await Alumni.find({})
-      .sort({ createdAt: -1 })
-      .limit(10)
-      .select("firstName lastName department gradYear location alumniCode createdAt");
-
-    const result = recent.map((a) => {
-      const diffMs   = Date.now() - new Date(a.createdAt).getTime();
-      const diffMins = Math.floor(diffMs / 60000);
-      return {
-        name:       `${a.firstName} ${a.lastName}`,
-        dept:       a.department,
-        year:       a.gradYear,
-        loc:        a.location || "Nigeria",
-        code:       a.alumniCode,
-        mins:       diffMins,
-      };
-    });
-
-    return res.json(result);
+    const recent = await Alumni.find({}).sort({ createdAt: -1 }).limit(10)
+      .select("firstName lastName department gradYear alumniCode createdAt");
+    return res.json(recent.map((a) => ({
+      name: `${a.firstName} ${a.lastName.charAt(0)}.`,
+      dept: a.department,
+      year: a.gradYear,
+      code: a.alumniCode.replace(/\d{4}$/, "••••"),
+      mins: Math.floor((Date.now() - new Date(a.createdAt).getTime()) / 60000),
+    })));
   } catch (err) {
     console.error("Recent alumni error:", err.message);
     return res.status(500).json({ error: "Could not fetch recent alumni." });
+  }
+});
+
+// GET /api/alumni/me - my own matching profile
+router.get("/me", authenticate, async (req, res) => {
+  const me = await Alumni.findById(req.user._id).select("skills occupation bio").lean();
+  res.json({ skills: me.skills || [], occupation: me.occupation || "", bio: me.bio || "" });
+});
+
+// PATCH /api/alumni/me - update skills / occupation / bio (only these fields, only for yourself)
+router.patch("/me", authenticate, async (req, res) => {
+  const parsed = validateProfileUpdate(req.body);
+  if (parsed.errors) return res.status(400).json({ error: parsed.errors[0] });
+  try {
+    const me = await Alumni.findByIdAndUpdate(req.user._id, { $set: parsed.value }, { new: true }).select("skills occupation bio").lean();
+    res.json({ skills: me.skills, occupation: me.occupation, bio: me.bio });
+  } catch (err) {
+    res.status(500).json({ error: "Could not update profile." });
   }
 });
 

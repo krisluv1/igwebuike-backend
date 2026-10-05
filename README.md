@@ -26,13 +26,64 @@ igwebuike-backend/
 
 ## API Endpoints
 
-| Method | Endpoint                  | Description                          |
-|--------|---------------------------|--------------------------------------|
-| GET    | `/`                       | Health check                         |
-| POST   | `/api/alumni/register`    | Register a new alumni member         |
-| GET    | `/api/alumni/recent`      | Get 10 most recent registrations     |
-| POST   | `/api/events/book`        | Book a spot for an event             |
-| GET    | `/api/events/bookings`    | List all bookings (admin)            |
+| Method | Endpoint                | Access        | Description                                   |
+|--------|-------------------------|---------------|-----------------------------------------------|
+| GET    | `/`                     | public        | Health check                                  |
+| POST   | `/api/alumni/register`  | public        | Register (needs consent) and auto-login       |
+| GET    | `/api/alumni/recent`    | public        | 10 newest members (names/codes masked)        |
+| POST   | `/api/auth/login`       | public        | Log in; sets httpOnly cookie                  |
+| POST   | `/api/auth/logout`      | any           | Log out and revoke all sessions               |
+| GET    | `/api/auth/me`          | logged in     | Current user                                  |
+| POST   | `/api/events/book`      | logged in     | Book an event (identity from session)         |
+| GET    | `/api/events/bookings`  | admin only    | List bookings                                 |
+| GET    | `/api/jobs`             | public        | Published jobs (`q`, `type`, `skill`, `location`, `page`) |
+| POST   | `/api/jobs`             | logged in     | Post a job (members: pending approval)        |
+| GET    | `/api/jobs/mine`        | logged in     | My jobs + application counts                  |
+| GET    | `/api/jobs/:id`         | public        | One published job                             |
+| POST   | `/api/jobs/:id/apply`   | logged in     | Apply (optional referral code)                |
+| GET    | `/api/jobs/:id/applications` | owner/admin | Applicants                                |
+| PATCH  | `/api/jobs/:id/close`   | owner/admin   | Close a job                                   |
+| GET    | `/api/applications/mine`| logged in     | My applications                               |
+| GET/PATCH | `/api/alumni/me`     | logged in     | My matching profile (skills, occupation, bio) |
+| GET    | `/api/jobs/recommended` | logged in     | Jobs ranked for me (ML, with keyword fallback) |
+| POST   | `/api/jobs/recommendations/events` | logged in | Log view/apply/dismiss feedback |
+| PATCH  | `/api/applications/:id/status` | owner/admin | Move an application through the pipeline |
+| GET/PATCH | `/api/admin/jobs/...` | admin only   | Moderation queue: approve / reject            |
+
+## Development, testing & CI
+
+```bash
+npm install                      # also creates package-lock.json - COMMIT IT (CI and Docker need it)
+npm run test:unit                # 13 fast tests, no database needed
+# integration tests need a local MongoDB; the DB name MUST end in _test (it gets dropped):
+MONGO_URI_TEST=mongodb://127.0.0.1:27017/igwebuike_test npm run test:integration
+docker compose up --build        # whole stack (API + MongoDB) with one command
+```
+- Integration test files each use their own database (`igwebuike_auth_test`, `igwebuike_jobs_test`), so they can run in parallel.
+- `npm test` runs everything (33 unit + 58 integration tests). `npm run test:coverage` prints coverage.
+- GitHub Actions (`.github/workflows/ci.yml`) runs the tests on Node 20 and 22 against a real MongoDB,
+  runs `npm audit` for high/critical vulnerabilities, and checks the Docker image builds.
+  `codeql.yml` adds static security analysis weekly and on every push. Dependabot opens update PRs.
+- API reference: `docs/openapi.yaml` (paste it into https://editor.swagger.io to browse).
+
+## Optional: ML matching service
+Set `ML_SERVICE_URL` and `ML_INTERNAL_KEY` (24+ chars, identical on both services) to enable AI ranking from `../ml-service`. Without them the site uses keyword matching. `npm run export-corpus > corpus.json` exports anonymised text to retrain the model.
+
+## Security
+See `docs/SECURITY.md` for the threat model. Run tests with `npm test`.
+Make a company an employer (jobs publish without review): `ROLE_EMAIL=hr@co.com ROLE=employer npm run set-role`
+
+Create the first admin (from your own machine, never via the API):
+`ADMIN_EMAIL=you@x.com ADMIN_PASSWORD='long passphrase' npm run create-admin`
+
+## New environment variables (REQUIRED on Render)
+| Key | Value |
+|-----|-------|
+| `NODE_ENV` | `production` |
+| `JWT_SECRET` | 48+ random chars: `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` |
+| `FRONTEND_URL` | exact Netlify URL, e.g. `https://yoursite.netlify.app` (no trailing slash) |
+
+Also: in MongoDB Atlas, replace "Allow access from anywhere (0.0.0.0/0)" with Render's outbound IPs where possible.
 
 ---
 
